@@ -20,3 +20,23 @@ left unfinished. Append as you go; a line or two per entry is right.
   - Seq scan on assignments: the `(start_date, end_date)` btree can't serve a two-sided overlap test. A GiST index on `daterange(start_date, end_date, '[]')` would, but the schema is fixed.
   - No pagination of people yet; thousands of rows is fine as JSON but will need virtualization in the grid.
 - Unit test covers range parsing only (snapping, new-year week, DST, max/reversed/invalid). No DB test harness exists; the SQL was checked against the running app as above. Run with: `docker run --rm -v "$PWD/api":/src -w /src capacity-grid-assignment-api go test ./...`
+
+## 2026-10-12 — Capacity grid (read-only)
+
+- **Range state** lives in `App` and mirrors to `?from=&to=` with `replaceState`, so a view can be linked and survives a reload. Back/forward browser history isn't wired (pushState + popstate would do it). Malformed URL dates fall back to the default; anything else, like a 27-week span, goes to the server and shows its error.
+- **Requested vs served range:** the URL and date inputs keep what the user asked for, e.g. Mar 4–20. Everything drawn (summary, week columns) comes from the response (Mar 2–22), because the server snaps to whole weeks. Prev/Next/This week snap client-side the same way and keep the week span, so they don't wait on a pending load.
+- **Out-of-order responses:** each range change aborts the previous fetch, and a resolved-but-aborted response is dropped. Mutation check: removing the guard makes the race test fail.
+- **Loading** keeps the previous table, dimmed (`aria-busy`, "Loading…" status), rather than blanking the grid.
+- **Errors:** the server's `{error}` message is shown with Retry. If an older table is still visible, the banner says which range it actually is.
+- **Over-allocation without relying on color:** a "▲ +Nh" badge, bold text and tinted cell, a fill bar, and an aria-label/tooltip such as "45h of 40h (113%)". Zero capacity reads "20h allocated, no capacity" and still gets "▲ +20".
+- Compare with a 1e-6 tolerance (allocations are sums of fractional rows). Display rounds to 1 decimal. Summary line counts people over in at least one week.
+- **Client-side range check** (order, ≤26 weeks) duplicates `maxWeeks` from Go as `MAX_WEEKS`. Keep them in sync, or later have the API expose it.
+- **Dates:** all date arithmetic is on UTC (`dates.ts`). Only "today" uses the viewer's local calendar date.
+- **Verified in headless Chrome** (screenshots plus clicks driven over the DevTools protocol):
+  - The default range matches the API numbers.
+  - Next/Prev/This week, Apply with a mid-week range, the reversed-range hint, the 27-week server error banner, a 26-week view, and dark mode all work.
+  - Name order is en_US collation, with non-Latin names last.
+- **Not done:**
+  - Rows aren't virtualized; 500 × 26 renders fine, but thousands of people will need windowing.
+  - No filter or sort (e.g. "only over-allocated").
+  - The loading state isn't visible in screenshots (local responses are too fast); it's covered by the component tests instead.
