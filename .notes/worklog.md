@@ -40,3 +40,20 @@ left unfinished. Append as you go; a line or two per entry is right.
   - Rows aren't virtualized; 500 × 26 renders fine, but thousands of people will need windowing.
   - No filter or sort (e.g. "only over-allocated").
   - The loading state isn't visible in screenshots (local responses are too fast); it's covered by the component tests instead.
+
+## 2026-10-12 — Editing weekly hours
+
+- **PATCH contract:** the stub defined no format, so I reused the GET field name. `PATCH /api/people/{id}` with `{"weeklyHours": n}` returns the saved `{id, name, weeklyHours}` (`UPDATE … RETURNING`). 400 for a bad id, bad JSON, unknown fields, or a value outside 0–168 (decimals allowed). 404 for an unknown person. Last write wins: there's no version column for a conditional update.
+- **Not optimistic.** The capacity column and every ▲ flag keep showing the server's value until the PATCH succeeds; meanwhile the editor shows "Saving…". A capacity change can flip flags across up to 26 weeks, and flashing them in and then reverting on failure seemed worse than a short wait.
+- **No refetch after save.** Allocation doesn't depend on capacity, so replacing that person's `weeklyHours` with the server's returned value recomputes the whole row (and the "N over capacity" summary). Capacity isn't effective-dated, so the new value applies to every week, past ones included. That's a limit of the data model (see the first entry), not of the UI.
+- **Race:** a range fetch that started before a save finished can return the old capacity. Confirmed saves are stamped from a counter shared with fetch starts and re-applied to older responses. Mutation check: removing it fails the test.
+- **Failed save:** the editor stays open with the draft and "Not saved — still 40h: <server message>", and Save retries. A second save for the same person is blocked while one is pending.
+- **Verified:**
+  - curl: all the 400/404 cases, a 37.5h save reflected in GET, then Dee restored to 40.
+  - Headless Chrome: save 40→45 cleared Dee's ▲ +5 in both weeks. Stopping the api container mid-session gave "Not saved — still 45h: Request failed (HTTP 502)" with the grid unchanged. Restarting and retrying succeeded.
+  - Dee is back at 40 in the database.
+- **Not done:**
+  - A 502 from the Vite proxy shows a generic "Request failed (HTTP 502)"; it could say "server unreachable".
+  - The capacity column widens while an error message is open.
+  - There's no "Saved" confirmation beyond the value changing.
+  - No keyboard flow between rows.

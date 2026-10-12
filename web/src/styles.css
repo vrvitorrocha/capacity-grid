@@ -195,3 +195,45 @@ td {
 .cell.under .bar > span { background: var(--under); }
 .cell.full .bar > span { background: var(--full); }
 .cell.over .bar > span { background: var(--over); }
+
+.capacity-edit {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 1px dashed transparent;
+  border-radius: 3px;
+  padding: 0.1rem 0.3rem;
+  cursor: pointer;
+}
+
+.capacity-edit span {
+  opacity: 0.4;
+}
+
+.capacity-edit:hover,
+.capacity-edit:focus-visible {
+  border-color: currentColor;
+}
+
+.capacity-edit:hover span,
+.capacity-edit:focus-visible span {
+  opacity: 1;
+}
+
+.capacity-form {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.capacity-form input {
+  width: 4.5rem;
+}
+
+.capacity-col .hint,
+.save-error {
+  margin: 0.25rem 0 0;
+  max-width: 16rem;
+  font-size: 0.8rem;
+  white-space: normal;
+  color: var(--over);
+}

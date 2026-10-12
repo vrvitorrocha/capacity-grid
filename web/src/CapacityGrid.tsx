@@ -1,5 +1,13 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import { fetchCapacity, MAX_WEEKS, type CapacityResponse } from './api'
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import {
+  fetchCapacity,
+  MAX_WEEKLY_HOURS,
+  MAX_WEEKS,
+  updateWeeklyHours,
+  type CapacityResponse,
+  type Person,
+  type PersonCapacity,
+} from './api'
 import { addDays, formatDate, mondayOf, parseISODate, sundayOf, todayISO, weekSpan } from './dates'
 
 type Props = {
@@ -29,17 +37,24 @@ export function CapacityGrid({ from, to, onRangeChange }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
 
+  // Capacity saves confirmed by the server, stamped from a counter shared with
+  // range fetches. A fetch that started before a save finished may carry the
+  // old weeklyHours, so those saves are re-applied to its response.
+  const clock = useRef(0)
+  const confirmed = useRef(new Map<number, { weeklyHours: number; at: number }>())
+
   useEffect(() => {
     // Each range change aborts the previous request, and a response for an
     // aborted request is dropped even if it still arrives — so a slow, older
     // range can never overwrite a newer one.
     const controller = new AbortController()
+    const startedAt = ++clock.current
     setLoading(true)
     setError(null)
     fetchCapacity(from, to, controller.signal).then(
       (next) => {
         if (controller.signal.aborted) return
-        setData(next)
+        setData(applyConfirmed(next, confirmed.current, startedAt))
         setLoading(false)
       },
       (err: unknown) => {
@@ -61,6 +76,15 @@ export function CapacityGrid({ from, to, onRangeChange }: Props) {
     onRangeChange(monday, addDays(monday, 7 * span - 1))
   }
   const retry = () => setAttempt((n) => n + 1)
+
+  // Rejects (leaving data untouched) if the save fails. On success the grid
+  // takes the server's value; allocation doesn't depend on capacity, so
+  // updating weeklyHours is all every over-allocation flag needs.
+  const saveWeeklyHours = async (id: number, weeklyHours: number) => {
+    const saved = await updateWeeklyHours(id, weeklyHours)
+    confirmed.current.set(saved.id, { weeklyHours: saved.weeklyHours, at: ++clock.current })
+    setData((current) => current && withPerson(current, saved))
+  }
 
   return (
     <section className="capacity" aria-busy={loading}>
@@ -95,7 +119,7 @@ export function CapacityGrid({ from, to, onRangeChange }: Props) {
         </div>
       )}
 
-      {data ? <Table data={data} stale={loading || error !== null} /> : loading && <p className="placeholder">Loading capacity…</p>}
+      {data ? <Table data={data} stale={loading || error !== null} onSaveWeeklyHours={saveWeeklyHours} /> : loading && <p className="placeholder">Loading capacity…</p>}
     </section>
   )
 }
@@ -136,7 +160,36 @@ function rangeProblem(from: string, to: string): string | null {
   return null
 }
 
-function Table({ data, stale }: { data: CapacityResponse; stale: boolean }) {
+type SaveWeeklyHours = (id: number, weeklyHours: number) => Promise<void>
+
+function withPerson(data: CapacityResponse, saved: Person): CapacityResponse {
+  return {
+    ...data,
+    people: data.people.map((p) => (p.id === saved.id ? { ...p, name: saved.name, weeklyHours: saved.weeklyHours } : p)),
+  }
+}
+
+function applyConfirmed(
+  data: CapacityResponse,
+  confirmed: Map<number, { weeklyHours: number; at: number }>,
+  fetchStartedAt: number,
+): CapacityResponse {
+  const people = data.people.map((p) => {
+    const save = confirmed.get(p.id)
+    return save && save.at > fetchStartedAt ? { ...p, weeklyHours: save.weeklyHours } : p
+  })
+  return { ...data, people }
+}
+
+function Table({
+  data,
+  stale,
+  onSaveWeeklyHours,
+}: {
+  data: CapacityResponse
+  stale: boolean
+  onSaveWeeklyHours: SaveWeeklyHours
+}) {
   const overCount = data.people.filter((p) => p.allocated.some((a) => a - p.weeklyHours > EPSILON)).length
 
   return (
@@ -168,7 +221,7 @@ function Table({ data, stale }: { data: CapacityResponse; stale: boolean }) {
               {data.people.map((person) => (
                 <tr key={person.id}>
                   <th scope="row">{person.name}</th>
-                  <td className="num capacity-col">{hours(person.weeklyHours)}h</td>
+                  <CapacityCell person={person} onSave={onSaveWeeklyHours} />
                   {person.allocated.map((allocated, i) => (
                     <Cell key={data.weeks[i]} allocated={allocated} capacity={person.weeklyHours} />
                   ))}
@@ -179,6 +232,95 @@ function Table({ data, stale }: { data: CapacityResponse; stale: boolean }) {
         </div>
       )}
     </>
+  )
+}
+
+// Edits one person's weekly hours. The value shown outside the editor is
+// always the server's; a pending or failed draft never stands in for it.
+function CapacityCell({ person, onSave }: { person: PersonCapacity; onSave: SaveWeeklyHours }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  const value = draft.trim() === '' ? NaN : Number(draft)
+  const invalid = !Number.isFinite(value) || value < 0 || value > MAX_WEEKLY_HOURS
+
+  const open = () => {
+    setDraft(String(person.weeklyHours))
+    setSaveError(null)
+    setEditing(true)
+  }
+  const close = () => {
+    setEditing(false)
+    setSaveError(null)
+  }
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (invalid || saving) return
+    if (value === person.weeklyHours) return close()
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await onSave(person.id, value)
+      setEditing(false)
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && !saving) close()
+  }
+
+  if (!editing) {
+    return (
+      <td className="num capacity-col">
+        <button
+          type="button"
+          className="capacity-edit"
+          onClick={open}
+          aria-label={`Edit weekly hours for ${person.name}, currently ${hours(person.weeklyHours)}h`}
+        >
+          {hours(person.weeklyHours)}h <span aria-hidden="true">✎</span>
+        </button>
+      </td>
+    )
+  }
+
+  return (
+    <td className="capacity-col editing">
+      <form className="capacity-form" onSubmit={submit} onKeyDown={onKeyDown}>
+        <input
+          type="number"
+          inputMode="decimal"
+          min={0}
+          max={MAX_WEEKLY_HOURS}
+          step="any"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          disabled={saving}
+          aria-label={`Weekly hours for ${person.name}`}
+          aria-invalid={invalid}
+          autoFocus
+        />
+        <button type="submit" disabled={invalid || saving}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        <button type="button" onClick={close} disabled={saving}>
+          Cancel
+        </button>
+      </form>
+      {invalid && !saving && <p className="hint">0–{MAX_WEEKLY_HOURS} hours</p>}
+      {saveError && (
+        <p className="save-error" role="alert">
+          Not saved — still {hours(person.weeklyHours)}h: {saveError}
+        </p>
+      )}
+    </td>
   )
 }
 
